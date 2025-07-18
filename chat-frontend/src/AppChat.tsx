@@ -1,23 +1,30 @@
 import { useState, useEffect, useRef } from "react";
-import io from "socket.io-client";
+import io, { Socket } from "socket.io-client";
 import { App, Button, Input } from "antd";
 import { getStatusText, iceServers, statuses } from "./utils";
+import Chat from "./components/chat";
+// Message type
+interface Message {
+  text: string;
+  sender: "local" | "remote";
+  timestamp: string;
+}
 
 const AppChat = () => {
-  const [roomId, setRoomId] = useState("");
-  const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState([]);
-  const [status, setStatus] = useState("disconnected");
-  const [error, setError] = useState("");
+  const [roomId, setRoomId] = useState<string>("");
+  const [message, setMessage] = useState<string>("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [status, setStatus] = useState<string>("disconnected");
+  const [error, setError] = useState<string>("");
   const { notification } = App.useApp();
-  const peerConnection = useRef(null);
-  const dataChannel = useRef(null);
-  const socketRef = useRef(null);
-  const roomIdRef = useRef("");
-  const isInitiatorRef = useRef(false);
+  const peerConnection = useRef<RTCPeerConnection | null>(null);
+  const dataChannel = useRef<RTCDataChannel | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const roomIdRef = useRef<string>("");
+  const isInitiatorRef = useRef<boolean>(false);
 
   useEffect(() => {
-    const newSocket = io(import.meta.env.VITE_SERVER_URL, {
+    const newSocket: Socket = io(import.meta.env.VITE_SERVER_URL, {
       transports: [import.meta.env.VITE_WEBSOCKET_TRANSPORTS],
       reconnection: import.meta.env.VITE_WEBSOCKET_RECONNECTION === "true",
       reconnectionAttempts:
@@ -29,9 +36,9 @@ const AppChat = () => {
 
     socketRef.current = newSocket;
 
-    const handlers = {
+    const handlers: Record<string, (...args: any[]) => void> = {
       [statuses.connected]: () => console.log("Connected to server"),
-      [statuses.joined]: (data) => {
+      [statuses.joined]: (data: { isInitiator: boolean; roomId: string }) => {
         isInitiatorRef.current = data.isInitiator;
         setStatus(statuses.waiting);
         setError("");
@@ -43,54 +50,54 @@ const AppChat = () => {
         try {
           await setupPeerConnection();
           if (isInitiatorRef.current) {
-            const offer = await peerConnection.current.createOffer();
-            await peerConnection.current.setLocalDescription(offer);
-            socketRef.current.emit(statuses.offer, {
+            const offer = await peerConnection.current!.createOffer();
+            await peerConnection.current!.setLocalDescription(offer);
+            socketRef.current!.emit(statuses.offer, {
               roomId: roomIdRef.current,
               offer,
             });
           }
-        } catch (err) {
+        } catch (err: any) {
           setError("Failed to create offer: " + err.message);
         }
       },
-      [statuses.offer]: async (offer) => {
+      [statuses.offer]: async (offer: RTCSessionDescriptionInit) => {
         setError("");
         setStatus(statuses.connecting);
         try {
           await setupPeerConnection();
-          await peerConnection.current.setRemoteDescription(
+          await peerConnection.current!.setRemoteDescription(
             new RTCSessionDescription(offer)
           );
-          const answer = await peerConnection.current.createAnswer();
-          await peerConnection.current.setLocalDescription(answer);
-          socketRef.current.emit(statuses.answer, {
+          const answer = await peerConnection.current!.createAnswer();
+          await peerConnection.current!.setLocalDescription(answer);
+          socketRef.current!.emit(statuses.answer, {
             roomId: roomIdRef.current,
             answer,
           });
-        } catch (err) {
+        } catch (err: any) {
           setError("Failed to handle offer: " + err.message);
         }
       },
-      [statuses.answer]: async (answer) => {
+      [statuses.answer]: async (answer: RTCSessionDescriptionInit) => {
         try {
           if (peerConnection.current) {
             await peerConnection.current.setRemoteDescription(
               new RTCSessionDescription(answer)
             );
           }
-        } catch (e) {
+        } catch (e: any) {
           setError("Failed to handle answer: " + e.message);
         }
       },
-      [statuses.ice_candidate]: async (candidate) => {
+      [statuses.ice_candidate]: async (candidate: RTCIceCandidateInit) => {
         if (candidate && peerConnection.current) {
           await peerConnection.current.addIceCandidate(
             new RTCIceCandidate(candidate)
           );
         }
       },
-      [statuses.room_full]: (room) => {
+      [statuses.room_full]: (room: string) => {
         setStatus(statuses.disconnected);
         setError(`Room ${room} is full! Try another room ID.`);
       },
@@ -99,7 +106,7 @@ const AppChat = () => {
         setError("Peer disconnected");
         cleanupConnection();
       },
-      [statuses.join_error]: (msg) => {
+      [statuses.join_error]: (msg: string) => {
         setError(msg);
         setStatus(statuses.disconnected);
       },
@@ -118,7 +125,7 @@ const AppChat = () => {
     };
   }, []);
 
-  const setupPeerConnection = async () => {
+  const setupPeerConnection = async (): Promise<boolean> => {
     if (peerConnection.current) return true;
     try {
       peerConnection.current = new RTCPeerConnection({ iceServers });
@@ -126,7 +133,7 @@ const AppChat = () => {
         dataChannel.current = peerConnection.current.createDataChannel("chat");
         setupDataChannel();
       } else {
-        peerConnection.current.ondatachannel = (event) => {
+        peerConnection.current.ondatachannel = (event: RTCDataChannelEvent) => {
           dataChannel.current = event.channel;
           setupDataChannel();
         };
@@ -142,7 +149,7 @@ const AppChat = () => {
       };
 
       peerConnection.current.onconnectionstatechange = () => {
-        const state = peerConnection.current.connectionState;
+        const state = peerConnection.current!.connectionState;
         setStatus(state);
         if (state === statuses.connected) setError("");
         else if (state === statuses.failed) {
@@ -152,7 +159,7 @@ const AppChat = () => {
       };
 
       return true;
-    } catch (err) {
+    } catch (err: any) {
       setError("Peer connection setup failed: " + err.message);
       cleanupConnection();
       return false;
@@ -165,7 +172,7 @@ const AppChat = () => {
       setStatus(statuses.connected);
       setError("");
     };
-    dataChannel.current.onmessage = (event) => {
+    dataChannel.current.onmessage = (event: MessageEvent) => {
       setMessages((prev) => [
         ...prev,
         {
@@ -179,8 +186,8 @@ const AppChat = () => {
       setStatus(statuses.disconnected);
       setError("Data channel closed");
     };
-    dataChannel.current.onerror = (e) => {
-      setError("Data channel error: " + e.message);
+    dataChannel.current.onerror = (e: Event) => {
+      setError("Data channel error: " + (e as any).message);
       setStatus(statuses.disconnected);
     };
   };
@@ -213,7 +220,7 @@ const AppChat = () => {
 
   const sendMessage = () => {
     const msg = message.trim();
-    if (!msg || !dataChannel.current?.readyState === "open") return;
+    if (!msg || dataChannel.current?.readyState !== "open") return;
     try {
       dataChannel.current.send(msg);
       setMessages((prev) => [
@@ -225,12 +232,12 @@ const AppChat = () => {
         },
       ]);
       setMessage("");
-    } catch (err) {
+    } catch (err: any) {
       setError("Failed to send message: " + err.message);
     }
   };
 
-  const handleKeyPress = (e) => {
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -288,48 +295,14 @@ const AppChat = () => {
       )}
 
       {status !== "disconnected" && (
-        <div className="border border-gray-200 rounded-lg overflow-hidden">
-          <div className="h-96 overflow-y-auto p-4 bg-gray-50 flex flex-col gap-3">
-            {messages.map((msg, index) => (
-              <div
-                key={index}
-                className={`max-w-md p-3 rounded-lg ${
-                  msg.sender === "local"
-                    ? "self-end bg-green-100 rounded-br-none"
-                    : "self-start bg-gray-200 rounded-bl-none"
-                }`}
-              >
-                <div>{msg.text}</div>
-                <div className="text-xs text-gray-500 text-right mt-1">
-                  {msg.timestamp}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-2 p-4 border-t border-gray-200 bg-white">
-            <Input.TextArea
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyPress={handleKeyPress}
-              placeholder="Type your message..."
-              disabled={status !== "connected"}
-              className="flex-1 rounded-full border border-gray-300 p-3 resize-none"
-              autoSize={{ minRows: 2, maxRows: 4 }}
-            />
-            <Button
-              onClick={sendMessage}
-              disabled={status !== "connected" || !message.trim()}
-              className={`rounded-full px-6 py-2 ${
-                status === "connected" && message.trim()
-                  ? "bg-blue-500 hover:bg-blue-600 text-white"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              Send
-            </Button>
-          </div>
-        </div>
+        <Chat
+          messages={messages}
+          message={message}
+          setMessage={setMessage}
+          handleKeyPress={handleKeyPress}
+          sendMessage={sendMessage}
+          status={status}
+        />
       )}
     </div>
   );

@@ -2,6 +2,23 @@ import { useEffect, useRef } from "react";
 import { Button, Input } from "antd";
 import { SendOutlined } from "@ant-design/icons";
 
+// Message type
+interface Message {
+  text: string;
+  sender: "local" | "remote";
+  timestamp: string;
+}
+
+// Props type
+interface ChatProps {
+  messages: Message[];
+  message: string;
+  setMessage: (msg: string) => void;
+  handleKeyPress: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  sendMessage: () => void;
+  status: string;
+}
+
 const Chat = ({
   messages,
   message,
@@ -9,8 +26,8 @@ const Chat = ({
   handleKeyPress,
   sendMessage,
   status,
-}) => {
-  const messagesContainerRef = useRef(null);
+}: ChatProps) => {
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const container = messagesContainerRef.current;
@@ -57,7 +74,6 @@ const Chat = ({
           className="flex-1 rounded-full border border-gray-300 p-2 focus:ring focus:ring-blue-200"
         />
         <Button
-          icon={<SendOutlined />}
           onClick={sendMessage}
           disabled={status !== "connected" || !message.trim()}
           className={`rounded-full px-4 py-2 ${
@@ -65,7 +81,9 @@ const Chat = ({
               ? "bg-blue-500 hover:bg-blue-600 text-white"
               : "bg-gray-200 text-gray-400 cursor-not-allowed"
           }`}
-        />
+        >
+          <SendOutlined />
+        </Button>
       </div>
     </div>
   );
