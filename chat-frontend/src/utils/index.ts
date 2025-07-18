@@ -25,20 +25,7 @@ export const iceServers: RTCIceServer[] = [
 ];
 
 export const getStatusText = (status: string): string => {
-  switch (status) {
-    case statuses.disconnected:
-      return statuses.disconnected;
-    case statuses.joining:
-      return statuses.joining;
-    case statuses.waiting:
-      return statuses.waiting;
-    case statuses.connecting:
-      return statuses.connecting;
-    case statuses.connected:
-      return statuses.connected;
-    case statuses.closed:
-      return statuses.closed;
-    default:
-      return status.toUpperCase();
-  }
+  return Object.values(statuses).includes(status as any)
+    ? status
+    : status.charAt(0).toUpperCase() + status.slice(1);
 }; 

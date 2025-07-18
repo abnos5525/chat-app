@@ -1,13 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Button, Input } from "antd";
 import { SendOutlined } from "@ant-design/icons";
-
-// Message type
-interface Message {
-  text: string;
-  sender: "local" | "remote";
-  timestamp: string;
-}
+import type { Message } from "../../types/chat";
 
 // Props type
 interface ChatProps {
@@ -18,6 +12,19 @@ interface ChatProps {
   sendMessage: () => void;
   status: string;
 }
+
+const MessageBubble = ({ msg }: { msg: Message }) => (
+  <div
+    className={`max-w-[70%] px-4 py-2 rounded-lg break-words ${
+      msg.sender === "local"
+        ? "self-end bg-green-100 rounded-br-none"
+        : "self-start bg-gray-200 rounded-bl-none"
+    }`}
+  >
+    <div>{msg.text}</div>
+    <div className="text-xs text-gray-500 text-right mt-1">{msg.timestamp}</div>
+  </div>
+);
 
 const Chat = ({
   messages,
@@ -46,19 +53,7 @@ const Chat = ({
         className="h-96 overflow-y-auto p-4 bg-gray-50 flex flex-col gap-3"
       >
         {messages.map((msg, index) => (
-          <div
-            key={index}
-            className={`max-w-[70%] px-4 py-2 rounded-lg break-words ${
-              msg.sender === "local"
-                ? "self-end bg-green-100 rounded-br-none"
-                : "self-start bg-gray-200 rounded-bl-none"
-            }`}
-          >
-            <div>{msg.text}</div>
-            <div className="text-xs text-gray-500 text-right mt-1">
-              {msg.timestamp}
-            </div>
-          </div>
+          <MessageBubble key={index} msg={msg} />
         ))}
       </div>
 

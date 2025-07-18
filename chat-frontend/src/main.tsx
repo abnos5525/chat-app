@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./index.css";
 import { App, notification } from "antd";
 import AppChat from "./AppChat";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 notification.config({
   placement: "topRight",
@@ -10,10 +11,14 @@ notification.config({
   duration: 3,
 });
 
+const queryClient = new QueryClient();
+
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
-    <App>
-      <AppChat />
-    </App>
+    <QueryClientProvider client={queryClient}>
+      <App>
+        <AppChat />
+      </App>
+    </QueryClientProvider>
   </StrictMode>
 ); 
