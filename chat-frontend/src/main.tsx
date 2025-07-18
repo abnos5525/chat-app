@@ -4,6 +4,7 @@ import "./index.css";
 import { App, notification } from "antd";
 import AppChat from "./AppChat";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ThemeProvider } from "./hooks/useTheme";
 
 notification.config({
   placement: "topRight",
@@ -16,9 +17,11 @@ const queryClient = new QueryClient();
 createRoot(document.getElementById("root") as HTMLElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App>
-        <AppChat />
-      </App>
+      <ThemeProvider>
+        <App>
+          <AppChat />
+        </App>
+      </ThemeProvider>
     </QueryClientProvider>
   </StrictMode>
-); 
+);
