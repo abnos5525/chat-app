@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "concurrently \"pnpm dev\" \"cd ../chat-backend && pnpm run start:dev\"",
-    "dev": "vite",
+    "dev": "vite --port 3001",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",

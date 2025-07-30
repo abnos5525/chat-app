@@ -28,4 +28,15 @@ export const getStatusText = (status: string): string => {
   return Object.values(statuses).includes(status as any)
     ? status
     : status.charAt(0).toUpperCase() + status.slice(1);
-}; 
+};
+
+// Generate unique 10-character token for user
+export const generateUniqueToken = () => {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let token = "";
+  for (let i = 0; i < 15; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
+};

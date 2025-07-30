@@ -4,6 +4,7 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
   SubscribeMessage,
+  OnGatewayInit,
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
@@ -15,103 +16,293 @@ import { Logger } from '@nestjs/common';
   },
 })
 export class SignalingGateway
-  implements OnGatewayConnection, OnGatewayDisconnect
+  implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit
 {
   @WebSocketServer() server: Server;
-  private rooms: Map<string, string[]> = new Map();
   private readonly logger = new Logger(SignalingGateway.name);
+
+  // Store client secret codes and their socket IDs
+  private clientSecrets: Map<string, string> = new Map(); // secretCode -> socketId
+  private clientSockets: Map<string, string> = new Map(); // socketId -> secretCode
+  private pendingConnections: Map<
+    string,
+    {
+      initiatorCode: string;
+      targetCode: string;
+      initiatorSocketId: string;
+      timestamp: number;
+    }
+  > = new Map(); // requestId -> connection info
+  private activeConnections: Map<
+    string,
+    {
+      initiatorSocketId: string;
+      targetSocketId: string;
+    }
+  > = new Map(); // connectionId -> connection info
+
+  afterInit() {
+    this.logger.log('Signaling Gateway initialized');
+  }
 
   handleConnection(client: Socket) {
     this.logger.log(`Client connected: ${client.id}`);
+    client.emit('connected');
   }
 
   handleDisconnect(client: Socket) {
     this.logger.log(`Client disconnected: ${client.id}`);
-    this.rooms.forEach((clients, roomId) => {
-      if (clients.includes(client.id)) {
-        const updatedClients = clients.filter((id) => id !== client.id);
-        this.rooms.set(roomId, updatedClients);
 
-        updatedClients.forEach((id) => {
-          this.server.to(id).emit('peer-disconnected');
-        });
+    // Get secret code before removing from maps
+    const secretCode = this.clientSockets.get(client.id);
 
-        if (updatedClients.length === 0) {
-          this.rooms.delete(roomId);
-        }
+    // Remove client from all maps
+    if (secretCode) {
+      this.clientSecrets.delete(secretCode);
+      this.clientSockets.delete(client.id);
+      this.logger.log(`Removed secret code: ${secretCode}`);
+    }
+
+    // Clean up pending connections
+    this.pendingConnections.forEach((connection, requestId) => {
+      if (connection.initiatorSocketId === client.id) {
+        this.pendingConnections.delete(requestId);
+      }
+    });
+
+    // Notify peers about disconnection
+    this.activeConnections.forEach((connection, connectionId) => {
+      if (
+        connection.initiatorSocketId === client.id ||
+        connection.targetSocketId === client.id
+      ) {
+        const otherSocketId =
+          connection.initiatorSocketId === client.id
+            ? connection.targetSocketId
+            : connection.initiatorSocketId;
+
+        this.server.to(otherSocketId).emit('peer-disconnected');
+        this.activeConnections.delete(connectionId);
       }
     });
   }
 
-  @SubscribeMessage('join')
-  handleJoin(client: Socket, roomId: string) {
-    const roomClients = this.rooms.get(roomId) || [];
+  @SubscribeMessage('register-client')
+  handleRegisterClient(client: Socket, payload: { secretCode: string }) {
+    const { secretCode } = payload;
 
-    // Prevent same client from joining twice
-    if (roomClients.includes(client.id)) {
-      client.emit('join-error', 'You are already in this room');
+    // Check if secret code is already taken by another client
+    const existingSocketId = this.clientSecrets.get(secretCode);
+    if (existingSocketId && existingSocketId !== client.id) {
+      client.emit('registration-error', 'Secret code already in use');
       return;
     }
 
-    if (roomClients.length >= 2) {
-      this.logger.warn(`Room ${roomId} is full`);
-      client.emit('room-full', roomId);
-      return;
-    }
-
-    roomClients.push(client.id);
-    this.rooms.set(roomId, roomClients);
-    client.join(roomId);
-    client.emit('joined', { roomId, isInitiator: roomClients.length === 1 });
+    // Register the client
+    this.clientSecrets.set(secretCode, client.id);
+    this.clientSockets.set(client.id, secretCode);
 
     this.logger.log(
-      `Client ${client.id} joined room ${roomId}. Room now has ${roomClients.length} clients`,
+      `Registered client ${client.id} with secret code: ${secretCode}`,
     );
+    client.emit('registration-success', { secretCode });
+  }
 
-    if (roomClients.length === 2) {
-      this.logger.log(`Room ${roomId} is full, initiating WebRTC handshake`);
-      roomClients.forEach((clientId) => {
-        this.server.to(clientId).emit('ready', roomId);
-      });
+  @SubscribeMessage('request-connection')
+  handleConnectionRequest(
+    client: Socket,
+    payload: { targetCode: string; fromCode: string },
+  ) {
+    const { targetCode, fromCode } = payload;
+
+    // Verify that the requester is registered
+    const requesterCode = this.clientSockets.get(client.id);
+    if (!requesterCode || requesterCode !== fromCode) {
+      client.emit(
+        'connection-error',
+        'You must register your secret code first',
+      );
+      return;
     }
+
+    // Check if target exists and is registered
+    const targetSocketId = this.clientSecrets.get(targetCode);
+    if (!targetSocketId) {
+      client.emit('target-not-found');
+      return;
+    }
+
+    // Check if client is trying to connect to themselves
+    if (fromCode === targetCode) {
+      client.emit('connection-error', 'Cannot connect to yourself');
+      return;
+    }
+
+    // Generate unique request ID
+    const requestId = `${client.id}-${targetSocketId}-${Date.now()}`;
+
+    // Store pending connection info
+    this.pendingConnections.set(requestId, {
+      initiatorCode: fromCode,
+      targetCode: targetCode,
+      initiatorSocketId: client.id,
+      timestamp: Date.now(),
+    });
+
+    // Notify target client about connection request
+    this.server.to(targetSocketId).emit('incoming-connection-request', {
+      fromCode,
+      requestId,
+    });
+
+    this.logger.log(`Connection request from ${fromCode} to ${targetCode}`);
+    client.emit('request-sent', { targetCode });
+  }
+
+  @SubscribeMessage('respond-to-request')
+  handleConnectionResponse(
+    client: Socket,
+    payload: { requestId: string; accepted: boolean },
+  ) {
+    const { requestId, accepted } = payload;
+    const pendingConnection = this.pendingConnections.get(requestId);
+
+    if (!pendingConnection) {
+      client.emit('connection-error', 'Invalid connection request');
+      return;
+    }
+
+    const { initiatorCode, targetCode, initiatorSocketId } = pendingConnection;
+
+    // Check if the responder is the target
+    const responderCode = this.clientSockets.get(client.id);
+    if (responderCode !== targetCode) {
+      client.emit('connection-error', 'Unauthorized response');
+      this.pendingConnections.delete(requestId);
+      return;
+    }
+
+    if (accepted) {
+      // Generate connection ID
+      const connectionId = `conn-${initiatorSocketId}-${client.id}-${Date.now()}`;
+
+      // Store active connection
+      this.activeConnections.set(connectionId, {
+        initiatorSocketId,
+        targetSocketId: client.id,
+      });
+
+      // Notify both parties
+      this.server.to(initiatorSocketId).emit('connection-accepted', {
+        connectionId,
+        targetCode,
+      });
+
+      this.server.to(client.id).emit('connection-established', {
+        connectionId,
+        initiatorCode,
+      });
+
+      this.logger.log(
+        `Connection accepted between ${initiatorCode} and ${targetCode}`,
+      );
+    } else {
+      // Notify initiator that request was rejected
+      this.server.to(initiatorSocketId).emit('connection-rejected', {
+        targetCode,
+      });
+      this.logger.log(
+        `Connection rejected by ${targetCode} for ${initiatorCode}`,
+      );
+    }
+
+    // Clean up pending connection
+    this.pendingConnections.delete(requestId);
   }
 
   @SubscribeMessage('offer')
-  handleOffer(
-    client: Socket,
-    payload: { roomId: string; offer: RTCSessionDescriptionInit },
-  ) {
-    const roomClients = this.rooms.get(payload.roomId) || [];
-    roomClients.forEach((clientId) => {
-      if (clientId !== client.id) {
-        this.server.to(clientId).emit('offer', payload.offer);
-      }
+  handleOffer(client: Socket, payload: { connectionId: string; offer: any }) {
+    const connection = this.activeConnections.get(payload.connectionId);
+    if (!connection) {
+      client.emit('connection-error', 'Invalid connection');
+      return;
+    }
+
+    // Validate offer structure
+    if (
+      !payload.offer ||
+      !payload.offer.type ||
+      payload.offer.sdp === undefined
+    ) {
+      client.emit('connection-error', 'Invalid offer format');
+      return;
+    }
+
+    const targetSocketId =
+      connection.initiatorSocketId === client.id
+        ? connection.targetSocketId
+        : connection.initiatorSocketId;
+
+    this.server.to(targetSocketId).emit('offer', {
+      connectionId: payload.connectionId,
+      offer: {
+        type: payload.offer.type,
+        sdp: payload.offer.sdp,
+      },
     });
   }
 
   @SubscribeMessage('answer')
-  handleAnswer(
-    client: Socket,
-    payload: { roomId: string; answer: RTCSessionDescriptionInit },
-  ) {
-    const roomClients = this.rooms.get(payload.roomId) || [];
-    roomClients.forEach((clientId) => {
-      if (clientId !== client.id) {
-        this.server.to(clientId).emit('answer', payload.answer);
-      }
+  handleAnswer(client: Socket, payload: { connectionId: string; answer: any }) {
+    const connection = this.activeConnections.get(payload.connectionId);
+    if (!connection) {
+      client.emit('connection-error', 'Invalid connection');
+      return;
+    }
+
+    // Validate answer structure
+    if (
+      !payload.answer ||
+      !payload.answer.type ||
+      payload.answer.sdp === undefined
+    ) {
+      client.emit('connection-error', 'Invalid answer format');
+      return;
+    }
+
+    const targetSocketId =
+      connection.initiatorSocketId === client.id
+        ? connection.targetSocketId
+        : connection.initiatorSocketId;
+
+    this.server.to(targetSocketId).emit('answer', {
+      connectionId: payload.connectionId,
+      answer: {
+        type: payload.answer.type,
+        sdp: payload.answer.sdp,
+      },
     });
   }
 
   @SubscribeMessage('ice-candidate')
   handleIceCandidate(
     client: Socket,
-    payload: { roomId: string; candidate: RTCIceCandidate },
+    payload: { connectionId: string; candidate: any },
   ) {
-    const roomClients = this.rooms.get(payload.roomId) || [];
-    roomClients.forEach((clientId) => {
-      if (clientId !== client.id) {
-        this.server.to(clientId).emit('ice-candidate', payload.candidate);
-      }
+    const connection = this.activeConnections.get(payload.connectionId);
+    if (!connection) {
+      // Don't send error for missing connections as ICE candidates can arrive after disconnection
+      return;
+    }
+
+    const targetSocketId =
+      connection.initiatorSocketId === client.id
+        ? connection.targetSocketId
+        : connection.initiatorSocketId;
+
+    this.server.to(targetSocketId).emit('ice-candidate', {
+      connectionId: payload.connectionId,
+      candidate: payload.candidate,
     });
   }
 }

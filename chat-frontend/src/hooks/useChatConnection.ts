@@ -1,23 +1,30 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import io, { Socket } from "socket.io-client";
-import { iceServers, statuses } from "../utils";
+import { iceServers, statuses } from "../utils"; // Make sure statuses is properly defined in your utils
 import { useQueryClient } from "@tanstack/react-query";
 import type { Message } from "../types/chat";
 
 interface State {
-  roomId: string;
+  localSecretCode: string;
+  targetSecretCode: string;
   message: string;
   messages: Message[];
   status: string;
   error: string;
+  incomingRequest: {
+    fromCode: string;
+    requestId: string;
+  } | null;
 }
 
 const initialState: State = {
-  roomId: "",
+  localSecretCode: "",
+  targetSecretCode: "",
   message: "",
   messages: [],
   status: "disconnected",
   error: "",
+  incomingRequest: null,
 };
 
 export function useChatConnection({ notification }: { notification: any }) {
@@ -25,101 +32,287 @@ export function useChatConnection({ notification }: { notification: any }) {
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
   const socketRef = useRef<Socket | null>(null);
-  const roomIdRef = useRef<string>("");
-  const isInitiatorRef = useRef<boolean>(false);
+  const connectionIdRef = useRef<string>("");
   const queryClient = useQueryClient();
+  const isRegisteredRef = useRef(false);
 
   // Setters for controlled inputs
-  const setRoomId = (roomId: string) => setState((s) => ({ ...s, roomId }));
+  const setLocalSecretCode = (code: string) =>
+    setState((s) => ({ ...s, localSecretCode: code }));
+  const setTargetSecretCode = (code: string) =>
+    setState((s) => ({ ...s, targetSecretCode: code }));
   const setMessage = (message: string) => setState((s) => ({ ...s, message }));
 
   // Socket and peer connection setup
   useEffect(() => {
+    // Parse the transports environment variable
+    let transports: string[] = ["websocket", "polling"]; // Default fallback
+    if (import.meta.env.VITE_WEBSOCKET_TRANSPORTS) {
+      try {
+        transports = import.meta.env.VITE_WEBSOCKET_TRANSPORTS.split(",");
+      } catch (e) {
+        console.warn(
+          "Failed to parse VITE_WEBSOCKET_TRANSPORTS, using defaults"
+        );
+      }
+    }
+
     const newSocket: Socket = io(import.meta.env.VITE_SERVER_URL, {
-      transports: [import.meta.env.VITE_WEBSOCKET_TRANSPORTS],
+      transports: transports,
       reconnection: import.meta.env.VITE_WEBSOCKET_RECONNECTION === "true",
       reconnectionAttempts:
-        parseInt(import.meta.env.VITE_WEBSOCKET_RECONNECTION_ATTEMPTS) ||
-        Infinity,
+        parseInt(
+          import.meta.env.VITE_WEBSOCKET_RECONNECTION_ATTEMPTS || "Infinity"
+        ) || Infinity,
       reconnectionDelay:
-        parseInt(import.meta.env.VITE_WEBSOCKET_RECONNECTION_DELAY) || 1000,
+        parseInt(import.meta.env.VITE_WEBSOCKET_RECONNECTION_DELAY || "1000") ||
+        1000,
     });
+
     socketRef.current = newSocket;
 
+    // Define event handlers
     const handlers: Record<string, (...args: any[]) => void> = {
-      [statuses.connected]: () => console.log("Connected to server"),
-      [statuses.joined]: (data: { isInitiator: boolean; roomId: string }) => {
-        isInitiatorRef.current = data.isInitiator;
-        setState((s) => ({ ...s, status: statuses.waiting, error: "" }));
-        notification.info({ message: `Joined room: ${data.roomId}` });
-      },
-      [statuses.ready]: async () => {
-        setState((s) => ({ ...s, error: "", status: statuses.connecting }));
-        try {
-          await setupPeerConnection();
-          if (isInitiatorRef.current) {
-            const offer = await peerConnection.current!.createOffer();
-            await peerConnection.current!.setLocalDescription(offer);
-            socketRef.current!.emit(statuses.offer, {
-              roomId: roomIdRef.current,
-              offer,
-            });
-          }
-        } catch (err: any) {
-          setState((s) => ({ ...s, error: "Failed to create offer: " + err.message }));
+      connected: () => {
+        console.log("Connected to server");
+        // Register client when connected if we have a secret code
+        if (state.localSecretCode) {
+          newSocket.emit("register-client", {
+            secretCode: state.localSecretCode,
+          });
+          isRegisteredRef.current = true;
         }
       },
-      [statuses.offer]: async (offer: RTCSessionDescriptionInit) => {
-        setState((s) => ({ ...s, error: "", status: statuses.connecting }));
+
+      "registration-success": (data: { secretCode: string }) => {
+        console.log(
+          "Successfully registered with secret code:",
+          data.secretCode
+        );
+        isRegisteredRef.current = true;
+      },
+
+      "registration-error": (data: { message: string }) => {
+        setState((s) => ({
+          ...s,
+          error: `Registration error: ${data.message}`,
+        }));
+      },
+
+      "incoming-connection-request": (data: {
+        fromCode: string;
+        requestId: string;
+      }) => {
+        setState((s) => ({
+          ...s,
+          incomingRequest: {
+            fromCode: data.fromCode,
+            requestId: data.requestId,
+          },
+        }));
+        notification.info({
+          message: "Connection Request",
+          description: `${data.fromCode} wants to connect with you`,
+          duration: 0,
+        });
+      },
+
+      "request-sent": (data: { targetCode: string }) => {
+        notification.info({
+          message: `Connection request sent to ${data.targetCode}`,
+        });
+      },
+
+      "connection-accepted": async (data: {
+        connectionId: string;
+        targetCode: string;
+      }) => {
+        connectionIdRef.current = data.connectionId;
+        setState((s) => ({
+          ...s,
+          status: "waiting",
+          error: "",
+          incomingRequest: null,
+        })); // Use string literal
+        notification.success({
+          message: `Connection accepted by ${data.targetCode}`,
+        });
+
         try {
-          await setupPeerConnection();
-          await peerConnection.current!.setRemoteDescription(
-            new RTCSessionDescription(offer)
-          );
-          const answer = await peerConnection.current!.createAnswer();
-          await peerConnection.current!.setLocalDescription(answer);
-          socketRef.current!.emit(statuses.answer, {
-            roomId: roomIdRef.current,
-            answer,
+          if (!peerConnection.current) {
+            await setupPeerConnection(true); // As initiator
+          }
+          const offer = await peerConnection.current!.createOffer();
+          await peerConnection.current!.setLocalDescription(offer);
+          socketRef.current!.emit("offer", {
+            connectionId: data.connectionId,
+            offer: {
+              type: offer.type,
+              sdp: offer.sdp,
+            },
           });
         } catch (err: any) {
-          setState((s) => ({ ...s, error: "Failed to handle offer: " + err.message }));
+          setState((s) => ({
+            ...s,
+            error: "Failed to create offer: " + err.message,
+          }));
         }
       },
-      [statuses.answer]: async (answer: RTCSessionDescriptionInit) => {
+
+      "connection-established": async (data: {
+        connectionId: string;
+        initiatorCode: string;
+      }) => {
+        connectionIdRef.current = data.connectionId;
+        setState((s) => ({
+          ...s,
+          status: "waiting",
+          error: "",
+          incomingRequest: null,
+        })); // Use string literal
+        notification.success({ message: `Connected to ${data.initiatorCode}` });
+
+        // Setup peer connection for responder
+        try {
+          if (!peerConnection.current) {
+            await setupPeerConnection(false); // As responder
+          }
+        } catch (err: any) {
+          setState((s) => ({
+            ...s,
+            error: "Failed to setup connection: " + err.message,
+          }));
+        }
+      },
+
+      offer: async (data: {
+        connectionId: string;
+        offer: RTCSessionDescriptionInit;
+      }) => {
+        setState((s) => ({ ...s, error: "", status: "connecting" })); // Use string literal
+        try {
+          if (!peerConnection.current) {
+            await setupPeerConnection(false); // As responder
+          }
+
+          // Validate offer before setting
+          if (!data.offer || !data.offer.type || data.offer.sdp === undefined) {
+            throw new Error("Invalid offer received");
+          }
+
+          await peerConnection.current!.setRemoteDescription(
+            new RTCSessionDescription({
+              type: data.offer.type as RTCSdpType,
+              sdp: data.offer.sdp,
+            })
+          );
+
+          const answer = await peerConnection.current!.createAnswer();
+          await peerConnection.current!.setLocalDescription(answer);
+
+          socketRef.current!.emit("answer", {
+            connectionId: data.connectionId, // Use connectionId from the received data
+            answer: {
+              type: answer.type,
+              sdp: answer.sdp,
+            },
+          });
+        } catch (err: any) {
+          setState((s) => ({
+            ...s,
+            error: "Failed to handle offer: " + err.message,
+          }));
+        }
+      },
+
+      answer: async (data: {
+        connectionId: string;
+        answer: RTCSessionDescriptionInit;
+      }) => {
         try {
           if (peerConnection.current) {
+            // Validate answer before setting
+            if (
+              !data.answer ||
+              !data.answer.type ||
+              data.answer.sdp === undefined
+            ) {
+              throw new Error("Invalid answer received");
+            }
+
             await peerConnection.current.setRemoteDescription(
-              new RTCSessionDescription(answer)
+              new RTCSessionDescription({
+                type: data.answer.type as RTCSdpType,
+                sdp: data.answer.sdp,
+              })
             );
           }
         } catch (e: any) {
-          setState((s) => ({ ...s, error: "Failed to handle answer: " + e.message }));
+          setState((s) => ({
+            ...s,
+            error: "Failed to handle answer: " + e.message,
+          }));
         }
       },
-      [statuses.ice_candidate]: async (candidate: RTCIceCandidateInit) => {
-        if (candidate && peerConnection.current) {
-          await peerConnection.current.addIceCandidate(
-            new RTCIceCandidate(candidate)
-          );
+
+      "ice-candidate": async (data: {
+        connectionId: string;
+        candidate: RTCIceCandidateInit;
+      }) => {
+        if (data.candidate && peerConnection.current) {
+          try {
+            await peerConnection.current.addIceCandidate(
+              new RTCIceCandidate(data.candidate)
+            );
+          } catch (err: any) {
+            console.warn("Failed to add ICE candidate:", err.message);
+          }
         }
       },
-      [statuses.room_full]: (room: string) => {
-        setState((s) => ({ ...s, status: statuses.disconnected, error: `Room ${room} is full! Try another room ID.` }));
+
+      "target-not-found": () => {
+        setState((s) => ({
+          ...s,
+          status: "disconnected",
+          error: "Target user not found or not available",
+        })); // Use string literal
       },
-      [statuses.peer_disconnected]: () => {
-        setState((s) => ({ ...s, status: statuses.disconnected, error: "Peer disconnected" }));
+
+      "peer-disconnected": () => {
+        setState((s) => ({
+          ...s,
+          status: "disconnected",
+          error: "Peer disconnected",
+          incomingRequest: null,
+        })); // Use string literal
         cleanupConnection();
       },
-      [statuses.join_error]: (msg: string) => {
-        setState((s) => ({ ...s, error: msg, status: statuses.disconnected }));
+
+      "connection-rejected": (data: { targetCode: string }) => {
+        setState((s) => ({
+          ...s,
+          status: "disconnected", // Use string literal
+          error: `Connection rejected by ${data.targetCode}`,
+          incomingRequest: null,
+        }));
+      },
+
+      "connection-error": (data: { message: string }) => {
+        setState((s) => ({
+          ...s,
+          status: "disconnected", // Use string literal
+          error: data.message,
+          incomingRequest: null,
+        }));
       },
     };
 
+    // Attach event handlers
     Object.entries(handlers).forEach(([event, handler]) =>
       newSocket.on(event, handler)
     );
 
+    // Cleanup function
     return () => {
       newSocket.disconnect();
       cleanupConnection();
@@ -127,17 +320,21 @@ export function useChatConnection({ notification }: { notification: any }) {
         newSocket.off(event, handler)
       );
     };
-    // eslint-disable-next-line
-  }, []);
+  }, [state.localSecretCode, notification]); // Added notification to dependencies
 
-  const setupPeerConnection = async (): Promise<boolean> => {
+  const setupPeerConnection = async (
+    isInitiator: boolean
+  ): Promise<boolean> => {
     if (peerConnection.current) return true;
     try {
       peerConnection.current = new RTCPeerConnection({ iceServers });
-      if (isInitiatorRef.current) {
+
+      if (isInitiator) {
+        // Create data channel for chat (initiator)
         dataChannel.current = peerConnection.current.createDataChannel("chat");
         setupDataChannel();
       } else {
+        // Wait for data channel (responder)
         peerConnection.current.ondatachannel = (event: RTCDataChannelEvent) => {
           dataChannel.current = event.channel;
           setupDataChannel();
@@ -145,26 +342,42 @@ export function useChatConnection({ notification }: { notification: any }) {
       }
 
       peerConnection.current.onicecandidate = ({ candidate }) => {
-        if (candidate && socketRef.current) {
-          socketRef.current.emit(statuses.ice_candidate, {
-            roomId: roomIdRef.current,
-            candidate,
+        if (candidate && socketRef.current && connectionIdRef.current) {
+          socketRef.current.emit("ice-candidate", {
+            connectionId: connectionIdRef.current,
+            candidate: {
+              candidate: candidate.candidate,
+              sdpMid: candidate.sdpMid,
+              sdpMLineIndex: candidate.sdpMLineIndex,
+              usernameFragment: candidate.usernameFragment,
+            },
           });
         }
       };
 
       peerConnection.current.onconnectionstatechange = () => {
         const state = peerConnection.current!.connectionState;
-        setState((s) => ({ ...s, status: state, error: state === statuses.connected ? "" : s.error }));
-        if (state === statuses.failed) {
-          setState((s) => ({ ...s, error: "Connection failed. Please try again.", status: statuses.disconnected }));
+        setState((s) => ({
+          ...s,
+          status: state,
+          error: state === "connected" ? "" : s.error, // Use string literal
+        }));
+        if (state === "failed") {
+          setState((s) => ({
+            ...s,
+            error: "Connection failed. Please try again.",
+            status: "disconnected", // Use string literal
+          }));
           cleanupConnection();
         }
       };
 
       return true;
     } catch (err: any) {
-      setState((s) => ({ ...s, error: "Peer connection setup failed: " + err.message }));
+      setState((s) => ({
+        ...s,
+        error: "Peer connection setup failed: " + err.message,
+      }));
       cleanupConnection();
       return false;
     }
@@ -173,7 +386,7 @@ export function useChatConnection({ notification }: { notification: any }) {
   const setupDataChannel = () => {
     if (!dataChannel.current) return;
     dataChannel.current.onopen = () => {
-      setState((s) => ({ ...s, status: statuses.connected, error: "" }));
+      setState((s) => ({ ...s, status: "connected", error: "" })); // Use string literal
     };
     dataChannel.current.onmessage = (event: MessageEvent) => {
       setState((s) => ({
@@ -189,10 +402,18 @@ export function useChatConnection({ notification }: { notification: any }) {
       }));
     };
     dataChannel.current.onclose = () => {
-      setState((s) => ({ ...s, status: statuses.disconnected, error: "Data channel closed" }));
+      setState((s) => ({
+        ...s,
+        status: "disconnected", // Use string literal
+        error: "Data channel closed",
+      }));
     };
     dataChannel.current.onerror = (e: Event) => {
-      setState((s) => ({ ...s, error: "Data channel error: " + (e as any).message, status: statuses.disconnected }));
+      setState((s) => ({
+        ...s,
+        error: "Data channel error: " + (e as any).message,
+        status: "disconnected", // Use string literal
+      }));
     };
   };
 
@@ -205,25 +426,77 @@ export function useChatConnection({ notification }: { notification: any }) {
       peerConnection.current.close();
       peerConnection.current = null;
     }
-    isInitiatorRef.current = false;
+    connectionIdRef.current = "";
+    setState((s) => ({ ...s, incomingRequest: null }));
+    isRegisteredRef.current = false;
   };
 
-  const joinRoom = useCallback(() => {
-    const id = state.roomId.trim();
-    if (!id) {
-      setState((s) => ({ ...s, error: "Please enter a room ID" }));
+  const connectToPeer = useCallback(() => {
+    const localCode = state.localSecretCode.trim();
+    const targetCode = state.targetSecretCode.trim();
+
+    if (!localCode) {
+      setState((s) => ({ ...s, error: "Please enter your secret code" }));
       return;
     }
-    roomIdRef.current = id;
+
+    if (!targetCode) {
+      setState((s) => ({ ...s, error: "Please enter target secret code" }));
+      return;
+    }
+
+    if (localCode === targetCode) {
+      setState((s) => ({ ...s, error: "Cannot connect to yourself" }));
+      return;
+    }
+
     setState((s) => ({ ...s, error: "", messages: [] }));
     cleanupConnection();
-    socketRef.current?.emit("join", id);
-    setState((s) => ({ ...s, status: statuses.joining }));
-  }, [state.roomId]);
+
+    // Ensure we're registered
+    if (socketRef.current && !isRegisteredRef.current) {
+      socketRef.current.emit("register-client", { secretCode: localCode });
+      isRegisteredRef.current = true;
+    }
+
+    // Request connection to target
+    if (socketRef.current) {
+      socketRef.current.emit("request-connection", {
+        targetCode: targetCode,
+        fromCode: localCode,
+      });
+      setState((s) => ({ ...s, status: "joining" })); // Use string literal
+    }
+  }, [state.localSecretCode, state.targetSecretCode]);
+
+  const respondToRequest = useCallback(
+    (accepted: boolean) => {
+      if (!state.incomingRequest || !socketRef.current) return;
+
+      socketRef.current.emit("respond-to-request", {
+        requestId: state.incomingRequest.requestId,
+        accepted,
+      });
+
+      if (!accepted) {
+        setState((s) => ({ ...s, incomingRequest: null }));
+      }
+    },
+    [state.incomingRequest]
+  );
 
   const sendMessage = useCallback(() => {
     const msg = state.message.trim();
-    if (!msg || dataChannel.current?.readyState !== "open") return;
+    if (
+      !msg ||
+      !dataChannel.current ||
+      dataChannel.current.readyState !== "open"
+    ) {
+      if (dataChannel.current && dataChannel.current.readyState !== "open") {
+        setState((s) => ({ ...s, error: "Data channel is not open yet" }));
+      }
+      return;
+    }
     try {
       dataChannel.current.send(msg);
       setState((s) => ({
@@ -239,9 +512,12 @@ export function useChatConnection({ notification }: { notification: any }) {
         message: "",
       }));
     } catch (err: any) {
-      setState((s) => ({ ...s, error: "Failed to send message: " + err.message }));
+      setState((s) => ({
+        ...s,
+        error: "Failed to send message: " + err.message,
+      }));
     }
-  }, [state.message]);
+  }, [state.message]); // Removed state.messages from dependencies as it's not directly used
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -251,16 +527,19 @@ export function useChatConnection({ notification }: { notification: any }) {
   };
 
   useEffect(() => {
-    state.error && notification.error({ message: state.error });
-    // eslint-disable-next-line
-  }, [state.error]);
+    if (state.error) {
+      notification.error({ message: state.error });
+    }
+  }, [state.error, notification]); // Added notification to dependencies
 
   return {
     state,
-    joinRoom,
+    connectToPeer,
     sendMessage,
     handleKeyPress,
-    setRoomId,
+    setLocalSecretCode,
+    setTargetSecretCode,
     setMessage,
+    respondToRequest,
   };
-} 
+}
