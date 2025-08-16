@@ -9,9 +9,21 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 
+// WebRTC type definitions
+interface RTCSessionDescription {
+  type: 'offer' | 'answer';
+  sdp: string;
+}
+
+interface RTCIceCandidate {
+  candidate: string;
+  sdpMLineIndex: number;
+  sdpMid: string;
+}
+
 @WebSocketGateway({
   cors: {
-    origin: 'http://localhost:5173',
+    origin: 'http://localhost:3000',
     methods: ['GET', 'POST'],
   },
 })
@@ -43,6 +55,21 @@ export class SignalingGateway
 
   afterInit() {
     this.logger.log('Signaling Gateway initialized');
+  }
+
+  /**
+   * Check if a client is already busy (connected to someone else)
+   */
+  private isClientBusy(socketId: string): boolean {
+    for (const connection of this.activeConnections.values()) {
+      if (
+        connection.initiatorSocketId === socketId ||
+        connection.targetSocketId === socketId
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   handleConnection(client: Socket) {
@@ -138,6 +165,14 @@ export class SignalingGateway
       return;
     }
 
+    // Check if target client is already busy (connected to someone else)
+    const isTargetBusy = this.isClientBusy(targetSocketId);
+    if (isTargetBusy) {
+      client.emit('target-busy', { targetCode });
+      this.logger.log(`Connection request rejected: ${targetCode} is busy`);
+      return;
+    }
+
     // Generate unique request ID
     const requestId = `${client.id}-${targetSocketId}-${Date.now()}`;
 
@@ -221,7 +256,10 @@ export class SignalingGateway
   }
 
   @SubscribeMessage('offer')
-  handleOffer(client: Socket, payload: { connectionId: string; offer: any }) {
+  handleOffer(
+    client: Socket,
+    payload: { connectionId: string; offer: RTCSessionDescription },
+  ) {
     const connection = this.activeConnections.get(payload.connectionId);
     if (!connection) {
       client.emit('connection-error', 'Invalid connection');
@@ -253,7 +291,10 @@ export class SignalingGateway
   }
 
   @SubscribeMessage('answer')
-  handleAnswer(client: Socket, payload: { connectionId: string; answer: any }) {
+  handleAnswer(
+    client: Socket,
+    payload: { connectionId: string; answer: RTCSessionDescription },
+  ) {
     const connection = this.activeConnections.get(payload.connectionId);
     if (!connection) {
       client.emit('connection-error', 'Invalid connection');
@@ -287,11 +328,10 @@ export class SignalingGateway
   @SubscribeMessage('ice-candidate')
   handleIceCandidate(
     client: Socket,
-    payload: { connectionId: string; candidate: any },
+    payload: { connectionId: string; candidate: RTCIceCandidate },
   ) {
     const connection = this.activeConnections.get(payload.connectionId);
     if (!connection) {
-      // Don't send error for missing connections as ICE candidates can arrive after disconnection
       return;
     }
 
