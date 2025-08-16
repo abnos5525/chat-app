@@ -45,30 +45,13 @@ export function useChatConnection({ notification }: { notification: any }) {
 
   // Socket and peer connection setup
   useEffect(() => {
-    // Parse the transports environment variable
-    let transports: string[] = ['websocket', 'polling']; // Default fallback
-    if (import.meta.env.VITE_WEBSOCKET_TRANSPORTS) {
-      try {
-        transports = import.meta.env.VITE_WEBSOCKET_TRANSPORTS.split(',');
-      } catch (e) {
-        console.warn(
-          'Failed to parse VITE_WEBSOCKET_TRANSPORTS, using defaults',
-        );
-      }
-    }
-
     const newSocket: Socket = io(
-      import.meta.env.VITE_SERVER_URL || 'http://localhost:3000',
+      import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001',
       {
-        transports: transports,
-        reconnection: import.meta.env.VITE_WEBSOCKET_RECONNECTION === 'true',
-        reconnectionAttempts:
-          parseInt(
-            import.meta.env.VITE_WEBSOCKET_RECONNECTION_ATTEMPTS || 'Infinity',
-          ) || Infinity,
-        reconnectionDelay:
-          parseInt(import.meta.env.VITE_WEBSOCKET_RECONNECTION_DELAY || '1000') ||
-          1000,
+        transports: ['websocket'], // Simplified transport configuration
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
       },
     );
 
